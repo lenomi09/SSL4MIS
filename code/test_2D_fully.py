@@ -9,6 +9,7 @@ import SimpleITK as sitk
 import torch
 from medpy import metric
 from scipy.ndimage import zoom
+from scipy.ndimage.interpolation import zoom
 from tqdm import tqdm
 
 # from networks.efficientunet import UNet
@@ -42,23 +43,19 @@ def test_single_volume(case, net, test_save_path, FLAGS):
     image = h5f["image"][:]
     label = h5f["label"][:]
     prediction = np.zeros_like(label)
-
     for ind in range(image.shape[0]):
         slice = image[ind, :, :]
         x, y = slice.shape[0], slice.shape[1]
         slice = zoom(slice, (256 / x, 256 / y), order=0)
         input = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
-
         net.eval()
         with torch.no_grad():
-            outputs = net(input)
-
-            # ✅ FIX: nếu model trả về tuple thì lấy output chính
-            if isinstance(outputs, (tuple, list)):
-                outputs = outputs[0]
-
-            out = torch.argmax(torch.softmax(outputs, dim=1), dim=1).squeeze(0)
-            out = out.cpu().numpy()
+            if FLAGS.model == "unet_urds":
+                out_main, _, _, _ = net(input)
+            else:
+                out_main = net(input)
+            out = torch.argmax(torch.softmax(out_main, dim=1), dim=1).squeeze(0)
+            out = out.cpu().detach().numpy()
             pred = zoom(out, (x / 256, y / 256), order=0)
             prediction[ind] = pred
 
@@ -75,7 +72,6 @@ def test_single_volume(case, net, test_save_path, FLAGS):
     sitk.WriteImage(prd_itk, test_save_path + case + "_pred.nii.gz")
     sitk.WriteImage(img_itk, test_save_path + case + "_img.nii.gz")
     sitk.WriteImage(lab_itk, test_save_path + case + "_gt.nii.gz")
-
     return first_metric, second_metric, third_metric
 
 
@@ -83,26 +79,19 @@ def Inference(FLAGS):
     with open(FLAGS.root_path + "/test.list", "r") as f:
         image_list = f.readlines()
     image_list = sorted([item.replace("\n", "").split(".")[0] for item in image_list])
-
     snapshot_path = "../model/{}_{}_labeled/{}".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model
     )
     test_save_path = "../model/{}_{}_labeled/{}_predictions/".format(
         FLAGS.exp, FLAGS.labeled_num, FLAGS.model
     )
-
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)
     os.makedirs(test_save_path)
-
-    net = net_factory(
-        net_type=FLAGS.model, in_chns=1, class_num=FLAGS.num_classes
-    ).cuda()
-
+    net = net_factory(net_type=FLAGS.model, in_chns=1, class_num=FLAGS.num_classes)
     save_mode_path = os.path.join(
         snapshot_path, "{}_best_model.pth".format(FLAGS.model)
     )
-
     net.load_state_dict(torch.load(save_mode_path))
     print("init weight from {}".format(save_mode_path))
     net.eval()
@@ -110,7 +99,6 @@ def Inference(FLAGS):
     first_total = 0.0
     second_total = 0.0
     third_total = 0.0
-
     for case in tqdm(image_list):
         first_metric, second_metric, third_metric = test_single_volume(
             case, net, test_save_path, FLAGS
@@ -118,7 +106,6 @@ def Inference(FLAGS):
         first_total += np.asarray(first_metric)
         second_total += np.asarray(second_metric)
         third_total += np.asarray(third_metric)
-
     avg_metric = [
         first_total / len(image_list),
         second_total / len(image_list),

@@ -26,27 +26,26 @@ from utils import losses, metrics, ramps
 from val_2D import test_single_volume_ds
 from networks.net_factory import net_factory
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--root_path", type=str, default="../data/ACDC", help="Name of Experiment"
 )
 parser.add_argument(
-    "--exp", type=str, default="ACDC/URPC_Optimized", help="experiment_name"
+    "--exp",
+    type=str,
+    default="ACDC/Uncertainty_Rectified_Pyramid_Consistency",
+    help="experiment_name",
 )
 parser.add_argument("--model", type=str, default="unet_urpc", help="model_name")
 parser.add_argument(
     "--max_iterations", type=int, default=30000, help="maximum epoch number to train"
-)  # 🔥 tăng iteration
+)
 parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
 parser.add_argument(
     "--deterministic", type=int, default=1, help="whether use deterministic training"
 )
 parser.add_argument(
-    "--base_lr",
-    type=float,
-    default=0.003,  # 🔥 giảm LR
-    help="segmentation network learning rate",
+    "--base_lr", type=float, default=0.01, help="segmentation network learning rate"
 )
 parser.add_argument(
     "--patch_size", type=list, default=[256, 256], help="patch size of network input"
@@ -61,13 +60,11 @@ parser.add_argument(
     "--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu"
 )
 parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
-
 # costs
 parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
 parser.add_argument(
-    "--consistency_rampup", type=float, default=1000.0, help="consistency_rampup"
-)  # 🔥 ramp-up chậm hơn
-
+    "--consistency_rampup", type=float, default=200.0, help="consistency_rampup"
+)
 args = parser.parse_args()
 
 
@@ -99,6 +96,7 @@ def patients_to_slices(dataset, patiens_num):
 
 
 def get_current_consistency_weight(epoch):
+    # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
 
@@ -108,7 +106,7 @@ def train(args, snapshot_path):
     batch_size = args.batch_size
     max_iterations = args.max_iterations
 
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes).cuda()
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -122,8 +120,11 @@ def train(args, snapshot_path):
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
     total_slices = len(db_train)
     labeled_slice = patients_to_slices(args.root_path, args.labeled_num)
-    print("Total slices: {}, labeled slices: {}".format(total_slices, labeled_slice))
-
+    print(
+        "Total silices is: {}, labeled slices is: {}".format(
+            total_slices, labeled_slice
+        )
+    )
     labeled_idxs = list(range(0, labeled_slice))
     unlabeled_idxs = list(range(labeled_slice, total_slices))
     batch_sampler = TwoStreamBatchSampler(
@@ -139,12 +140,12 @@ def train(args, snapshot_path):
     )
 
     model.train()
+
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
     optimizer = optim.SGD(
         model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001
     )
-
     ce_loss = CrossEntropyLoss()
     dice_loss = losses.DiceLoss(num_classes)
 
@@ -156,14 +157,11 @@ def train(args, snapshot_path):
     best_performance = 0.0
     kl_distance = nn.KLDivLoss(reduction="none")
     iterator = tqdm(range(max_epoch), ncols=70)
-
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
 
-            volume_batch, label_batch = (
-                sampled_batch["image"].cuda(),
-                sampled_batch["label"].cuda(),
-            )
+            volume_batch, label_batch = sampled_batch["image"], sampled_batch["label"]
+            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
 
             outputs, outputs_aux1, outputs_aux2, outputs_aux3 = model(volume_batch)
             outputs_soft = torch.softmax(outputs, dim=1)
@@ -171,18 +169,20 @@ def train(args, snapshot_path):
             outputs_aux2_soft = torch.softmax(outputs_aux2, dim=1)
             outputs_aux3_soft = torch.softmax(outputs_aux3, dim=1)
 
-            # ===== SUPERVISED LOSS (🔥 ưu tiên Dice) =====
             loss_ce = ce_loss(
-                outputs[: args.labeled_bs], label_batch[: args.labeled_bs].long()
+                outputs[: args.labeled_bs], label_batch[: args.labeled_bs][:].long()
             )
             loss_ce_aux1 = ce_loss(
-                outputs_aux1[: args.labeled_bs], label_batch[: args.labeled_bs].long()
+                outputs_aux1[: args.labeled_bs],
+                label_batch[: args.labeled_bs][:].long(),
             )
             loss_ce_aux2 = ce_loss(
-                outputs_aux2[: args.labeled_bs], label_batch[: args.labeled_bs].long()
+                outputs_aux2[: args.labeled_bs],
+                label_batch[: args.labeled_bs][:].long(),
             )
             loss_ce_aux3 = ce_loss(
-                outputs_aux3[: args.labeled_bs], label_batch[: args.labeled_bs].long()
+                outputs_aux3[: args.labeled_bs],
+                label_batch[: args.labeled_bs][:].long(),
             )
 
             loss_dice = dice_loss(
@@ -203,13 +203,16 @@ def train(args, snapshot_path):
             )
 
             supervised_loss = (
-                0.3 * (loss_ce + loss_ce_aux1 + loss_ce_aux2 + loss_ce_aux3) / 4
-                + 0.7
-                * (loss_dice + loss_dice_aux1 + loss_dice_aux2 + loss_dice_aux3)
-                / 4
-            )
+                loss_ce
+                + loss_ce_aux1
+                + loss_ce_aux2
+                + loss_ce_aux3
+                + loss_dice
+                + loss_dice_aux1
+                + loss_dice_aux2
+                + loss_dice_aux3
+            ) / 8
 
-            # ===== CONSISTENCY LOSS =====
             preds = (
                 outputs_soft + outputs_aux1_soft + outputs_aux2_soft + outputs_aux3_soft
             ) / 4
@@ -253,11 +256,11 @@ def train(args, snapshot_path):
             )
             exp_variance_aux3 = torch.exp(-variance_aux3)
 
-            consistency_weight = get_current_consistency_weight(iter_num)
-
+            consistency_weight = get_current_consistency_weight(iter_num // 150)
             consistency_dist_main = (
                 preds[args.labeled_bs :] - outputs_soft[args.labeled_bs :]
             ) ** 2
+
             consistency_loss_main = torch.mean(
                 consistency_dist_main * exp_variance_main
             ) / (torch.mean(exp_variance_main) + 1e-8) + torch.mean(variance_main)
@@ -289,9 +292,7 @@ def train(args, snapshot_path):
                 + consistency_loss_aux2
                 + consistency_loss_aux3
             ) / 4
-
             loss = supervised_loss + consistency_weight * consistency_loss
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -300,16 +301,29 @@ def train(args, snapshot_path):
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr_
 
-            iter_num += 1
-
+            iter_num = iter_num + 1
             writer.add_scalar("info/lr", lr_, iter_num)
             writer.add_scalar("info/total_loss", loss, iter_num)
             writer.add_scalar("info/loss_ce", loss_ce, iter_num)
             writer.add_scalar("info/loss_dice", loss_dice, iter_num)
             writer.add_scalar("info/consistency_loss", consistency_loss, iter_num)
             writer.add_scalar("info/consistency_weight", consistency_weight, iter_num)
+            logging.info(
+                "iteration %d : loss : %f, loss_ce: %f, loss_dice: %f"
+                % (iter_num, loss.item(), loss_ce.item(), loss_dice.item())
+            )
 
-            if iter_num % 200 == 0:
+            if iter_num % 20 == 0:
+                image = volume_batch[1, 0:1, :, :]
+                writer.add_image("train/Image", image, iter_num)
+                outputs = torch.argmax(
+                    torch.softmax(outputs, dim=1), dim=1, keepdim=True
+                )
+                writer.add_image("train/Prediction", outputs[1, ...] * 50, iter_num)
+                labs = label_batch[1, ...].unsqueeze(0) * 50
+                writer.add_image("train/GroundTruth", labs, iter_num)
+
+            if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
                 metric_list = 0.0
                 for i_batch, sampled_batch in enumerate(valloader):
@@ -321,17 +335,36 @@ def train(args, snapshot_path):
                     )
                     metric_list += np.array(metric_i)
                 metric_list = metric_list / len(db_val)
+                for class_i in range(num_classes - 1):
+                    writer.add_scalar(
+                        "info/val_{}_dice".format(class_i + 1),
+                        metric_list[class_i, 0],
+                        iter_num,
+                    )
+                    writer.add_scalar(
+                        "info/val_{}_hd95".format(class_i + 1),
+                        metric_list[class_i, 1],
+                        iter_num,
+                    )
 
                 performance = np.mean(metric_list, axis=0)[0]
+
                 mean_hd95 = np.mean(metric_list, axis=0)[1]
                 writer.add_scalar("info/val_mean_dice", performance, iter_num)
                 writer.add_scalar("info/val_mean_hd95", mean_hd95, iter_num)
 
                 if performance > best_performance:
                     best_performance = performance
+                    save_mode_path = os.path.join(
+                        snapshot_path,
+                        "iter_{}_dice_{}.pth".format(
+                            iter_num, round(best_performance, 4)
+                        ),
+                    )
                     save_best = os.path.join(
                         snapshot_path, "{}_best_model.pth".format(args.model)
                     )
+                    torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best)
 
                 logging.info(
@@ -352,7 +385,6 @@ def train(args, snapshot_path):
         if iter_num >= max_iterations:
             iterator.close()
             break
-
     writer.close()
     return "Training Finished!"
 
