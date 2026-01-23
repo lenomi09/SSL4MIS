@@ -50,12 +50,11 @@ def test_single_volume(case, net, test_save_path, FLAGS):
             0).unsqueeze(0).float().cuda()
         net.eval()
         with torch.no_grad():
-            if FLAGS.model == "unet_urds":
-                out_main, _, _, _ = net(input)
-            else:
-                out_main = net(input)
-            out = torch.argmax(torch.softmax(
-                out_main, dim=1), dim=1).squeeze(0)
+            out_main = net(input)
+            if isinstance(out_main, (tuple, list)):
+                out_main = out_main[0]   # 🔥 FIX: lấy output chính
+
+            out = torch.argmax(torch.softmax(out_main, dim=1), dim=1).squeeze(0)
             out = out.cpu().detach().numpy()
             pred = zoom(out, (x / 256, y / 256), order=0)
             prediction[ind] = pred
