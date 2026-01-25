@@ -40,12 +40,12 @@ parser.add_argument("--model", type=str, default="unet_urpc", help="model_name")
 parser.add_argument(
     "--max_iterations", type=int, default=30000, help="maximum epoch number to train"
 )
-parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
+parser.add_argument("--batch_size", type=int, default=32, help="batch_size per gpu")
 parser.add_argument(
     "--deterministic", type=int, default=1, help="whether use deterministic training"
 )
 parser.add_argument(
-    "--base_lr", type=float, default=0.01, help="segmentation network learning rate"
+    "--base_lr", type=float, default=0.001, help="segmentation network learning rate"
 )
 parser.add_argument(
     "--patch_size", type=list, default=[256, 256], help="patch size of network input"
@@ -57,13 +57,13 @@ parser.add_argument(
 
 # label and unlabel
 parser.add_argument(
-    "--labeled_bs", type=int, default=12, help="labeled_batch_size per gpu"
+    "--labeled_bs", type=int, default=16, help="labeled_batch_size per gpu"
 )
 parser.add_argument("--labeled_num", type=int, default=7, help="labeled data")
 # costs
 parser.add_argument("--consistency", type=float, default=0.1, help="consistency")
 parser.add_argument(
-    "--consistency_rampup", type=float, default=200.0, help="consistency_rampup"
+    "--consistency_rampup", type=float, default=500.0, help="consistency_rampup"
 )
 args = parser.parse_args()
 
@@ -255,7 +255,7 @@ def train(args, snapshot_path):
             )
             exp_variance_aux3 = torch.exp(-variance_aux3)
 
-            consistency_weight = get_current_consistency_weight(iter_num // 150)
+            consistency_weight = get_current_consistency_weight(iter_num // 200)
             consistency_dist_main = (
                 preds[args.labeled_bs :] - outputs_soft[args.labeled_bs :]
             ) ** 2
